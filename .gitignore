@@ -1,0 +1,26 @@
+# Google credentials — NEVER commit these
+*.json
+token.pickle
+secrets.toml
+.streamlit/secrets.toml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output files
+Facturas_Resultado*.xlsx
+
+# Old tkinter app
+checador_facturas.py
+ejecutar.bat
+instalar_dependencias.bat
