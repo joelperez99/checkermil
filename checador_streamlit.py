@@ -7,6 +7,8 @@ de Google Drive y extrae Folio, Descripción y Cantidad.
 import io
 import json
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -85,6 +87,7 @@ class InvoiceIndex:
 
     def __init__(self):
         self._data: dict[str, dict] = {}
+        self._lock = threading.Lock()
 
     # ---- public API --------------------------------------------------------
 
@@ -98,8 +101,9 @@ class InvoiceIndex:
             "cant":        self._extract_cant(text),
             "file":        file_name,
         }
-        for sn in sale_numbers:
-            self._data[sn] = entry
+        with self._lock:
+            for sn in sale_numbers:
+                self._data[sn] = entry
         return sale_numbers
 
     def lookup(self, sale_number: str) -> dict | None:
@@ -202,31 +206,61 @@ def download_pdf(service, file_id: str) -> io.BytesIO:
     return buf
 
 
+MAX_WORKERS = 6   # parallel PDF downloads; raise if you have many invoices
+
+
 def build_index(service, folder_id: str) -> InvoiceIndex | None:
-    """Download every PDF and build the invoice index. Shows progress in-place."""
+    """Download PDFs in parallel and build the invoice index with live progress."""
     files = list_all_pdfs(service, folder_id)
     if not files:
         st.warning("No se encontraron archivos PDF en la carpeta de Google Drive.")
         return None
 
+    total = len(files)
     index = InvoiceIndex()
-    bar   = st.progress(0.0, text=f"Indexando {len(files)} facturas…")
-    log   = st.empty()
+
+    # ── UI placeholders ─────────────────────────────────────────────────────
+    st.caption(f"Descargando **{total}** facturas con **{MAX_WORKERS}** hilos en paralelo…")
+    bar        = st.progress(0.0)
+    cols       = st.columns(3)
+    cnt_pdfs   = cols[0].empty()   # PDFs leídos
+    cnt_ventas = cols[1].empty()   # ventas indexadas
+    cnt_errors = cols[2].empty()   # errores
+    log        = st.empty()
+
+    completed = 0
+    errors    = 0
     msgs: list[str] = []
 
-    for i, f in enumerate(files, start=1):
-        bar.progress(i / len(files), text=f"[{i}/{len(files)}] {f['name']}")
-        try:
-            buf  = download_pdf(service, f["id"])
-            text = "\n".join(p.extract_text() or "" for p in pdfplumber.open(buf).pages)
-            sns  = index.add_pdf(text, f["name"])
-            icon = "✅" if sns else "⬜"
-            msgs.append(f"{icon} {f['name']}" + (f" → {', '.join(sns)}" if sns else ""))
-        except Exception as exc:
-            msgs.append(f"⚠️ {f['name']}: {exc}")
-        log.code("\n".join(msgs[-30:]))   # show last 30 lines
+    def _process(f: dict) -> tuple[str, list[str]]:
+        """Download + extract text + index one PDF. Runs in worker thread."""
+        buf  = download_pdf(service, f["id"])
+        text = "\n".join(p.extract_text() or "" for p in pdfplumber.open(buf).pages)
+        sns  = index.add_pdf(text, f["name"])
+        return f["name"], sns
 
-    bar.progress(1.0, text="Indexación completa ✓")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
+        futures = {pool.submit(_process, f): f for f in files}
+
+        for future in as_completed(futures):
+            completed += 1
+            try:
+                name, sns = future.result()
+                icon = "✅" if sns else "⬜"
+                msgs.append(f"{icon} {name}" + (f"  →  {', '.join(sns)}" if sns else ""))
+            except Exception as exc:
+                errors += 1
+                msgs.append(f"⚠️  {futures[future]['name']}: {exc}")
+
+            # Update UI (runs in the main Streamlit thread via as_completed iteration)
+            pct = completed / total
+            bar.progress(pct, text=f"{completed} / {total} PDFs  ({pct:.0%})")
+            cnt_pdfs.metric("📄 PDFs leídos",       f"{completed} / {total}")
+            cnt_ventas.metric("🗂️ Ventas indexadas", len(index))
+            cnt_errors.metric("⚠️ Errores",          errors)
+            log.code("\n".join(msgs[-40:]))   # rolling log, last 40 lines
+
+    bar.progress(1.0, text=f"Indexación completa ✓  —  {len(index)} ventas en {total} facturas")
     return index
 
 
