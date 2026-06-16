@@ -180,19 +180,37 @@ class InvoiceIndex:
 # ---------------------------------------------------------------------------
 
 def list_all_pdfs(service, folder_id: str) -> list[dict]:
-    files, token = [], None
-    while True:
-        r = service.files().list(
-            q=f"'{folder_id}' in parents and mimeType='application/pdf' and trashed=false",
-            fields="nextPageToken, files(id, name)",
-            pageSize=1000,
-            pageToken=token,
-        ).execute()
-        files.extend(r.get("files", []))
-        token = r.get("nextPageToken")
-        if not token:
-            break
-    return files
+    """BFS recursivo: encuentra todos los PDFs en la carpeta y sus subcarpetas."""
+    pdf_files: list[dict] = []
+    folder_queue = [folder_id]
+    scanned_folders = 0
+
+    status = st.empty()
+
+    while folder_queue:
+        fid = folder_queue.pop(0)
+        scanned_folders += 1
+        status.caption(f"🔍 Escaneando subcarpetas… {scanned_folders} carpeta(s) | {len(pdf_files)} PDFs encontrados")
+
+        token = None
+        while True:
+            r = service.files().list(
+                q=f"'{fid}' in parents and trashed=false",
+                fields="nextPageToken, files(id, name, mimeType)",
+                pageSize=1000,
+                pageToken=token,
+            ).execute()
+            for f in r.get("files", []):
+                if f["mimeType"] == "application/pdf":
+                    pdf_files.append({"id": f["id"], "name": f["name"]})
+                elif f["mimeType"] == "application/vnd.google-apps.folder":
+                    folder_queue.append(f["id"])
+            token = r.get("nextPageToken")
+            if not token:
+                break
+
+    status.caption(f"✅ {scanned_folders} carpeta(s) escaneadas — {len(pdf_files)} PDFs encontrados")
+    return pdf_files
 
 
 def download_pdf(service, file_id: str) -> io.BytesIO:
